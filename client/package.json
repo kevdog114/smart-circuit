@@ -1,0 +1,28 @@
+{
+  "name": "client",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "debug:import": "tsx tools/easyeda-debug.ts"
+  },
+  "devDependencies": {
+    "@types/pako": "^2.0.4",
+    "@types/sql.js": "^1.4.10",
+    "tsx": "^4.21.0",
+    "typescript": "~5.9.3",
+    "vite": "^8.0.1",
+    "vitest": "^4.1.0"
+  },
+  "dependencies": {
+    "@tscircuit/ngspice-spice-engine": "^0.0.8",
+    "pako": "^2.1.0",
+    "sql.js": "^1.14.1",
+    "uplot": "^1.6.32"
+  }
+}
