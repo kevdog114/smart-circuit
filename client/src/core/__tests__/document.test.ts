@@ -268,7 +268,7 @@ describe('MoveComponentCommand', () => {
     // Add R2
     const c2Cmd = new AddComponentCommand(sheet.id, def, { x: 200, y: 200 }, '10k', 'R2');
     c2Cmd.execute(doc);
-    const r2 = sheet.components.find(c => c.designator === 'R2')!;
+    sheet.components.find(c => c.designator === 'R2')!;
 
     // Draw a wire from R1 pin2 (120,200) to R2 pin1 (180,200)
     const addWire = new AddWireCommand(sheet.id, [
@@ -276,7 +276,7 @@ describe('MoveComponentCommand', () => {
     ]);
     addWire.execute(doc);
 
-    const wireId = sheet.wires[0].id;
+    sheet.wires[0].id;
     expect(sheet.wires).toHaveLength(1);
     expect(sheet.labels).toHaveLength(0);
 

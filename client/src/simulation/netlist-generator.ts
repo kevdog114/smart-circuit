@@ -542,29 +542,3 @@ function buildAnalysisLine(config: SimulationConfig): string {
   }
 }
 
-/**
- * Build SPICE .control block.
- */
-function buildControlBlock(config: SimulationConfig): string {
-  const lines: string[] = [];
-  lines.push('.control');
-  lines.push('run');
-
-  switch (config.analysis) {
-    case 'transient':
-      lines.push('plot all');
-      break;
-    case 'ac':
-      lines.push('plot all');
-      break;
-    case 'dc':
-      lines.push('plot all');
-      break;
-    case 'op':
-      lines.push('print all');
-      break;
-  }
-
-  lines.push('.endc');
-  return lines.join('\n');
-}
