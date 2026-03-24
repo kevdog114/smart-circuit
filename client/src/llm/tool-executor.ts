@@ -1,3 +1,4 @@
+import { API_BASE } from '../config';
 import type { CircuitDocument, ComponentDefinition, Point, Sheet } from '../core/types';
 import { layoutSubcircuit } from './subcircuit-layout';
 import { renderSubcircuitPreview, createPreviewPlaceholder } from './subcircuit-preview';
@@ -567,7 +568,7 @@ export class ToolExecutor {
           q: selectedLcsc || searchQuery,
           limit: '20',
         });
-        const res = await fetch(`http://localhost:3001/api/components/search?${params}`);
+        const res = await fetch(`${API_BASE}/components/search?${params}`);
         const data = await res.json();
         const results: any[] = data.results || [];
 
@@ -621,7 +622,7 @@ export class ToolExecutor {
               q: selectedLcsc || searchQuery,
               limit: '20',
             });
-            const res = await fetch(`http://localhost:3001/api/components/search?${params}`);
+            const res = await fetch(`${API_BASE}/components/search?${params}`);
             const data = await res.json();
             const results: any[] = data.results || [];
             match = selectedLcsc
@@ -804,7 +805,7 @@ export class ToolExecutor {
       if (cached) return cached;
 
       try {
-        const res = await fetch(`http://localhost:3001/api/components/resolve?mpn=${encodeURIComponent(mpn)}`);
+        const res = await fetch(`${API_BASE}/components/resolve?mpn=${encodeURIComponent(mpn)}`);
         if (res.ok) {
           const resolved: ResolvedComponentResponse = await res.json();
           if (resolved.pins?.length > 0) {

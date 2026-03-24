@@ -1,7 +1,6 @@
 import type { CircuitDocument } from '../core/types';
 import { serializeDocument, deserializeDocument } from '../core/document';
-
-const API_BASE = 'http://localhost:3001/api';
+import { API_BASE } from '../config';
 
 export interface ProjectSummary {
   id: string;

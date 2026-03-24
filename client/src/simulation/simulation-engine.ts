@@ -109,7 +109,8 @@ export class MockSimulationEngine {
 
 // ----- SimulationEngine (HTTP-based, calls backend) -----
 
-const SERVER_URL = 'http://localhost:3001';
+import { API_URL } from '../config';
+const SERVER_URL = API_URL;
 const RUN_TIMEOUT_MS = 60_000; // 60 seconds per simulation
 
 /**

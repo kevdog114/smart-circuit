@@ -13,7 +13,13 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-app.use(cors({ origin: 'http://localhost:5173' }));
+// In production the built client is served from the same origin;
+// in development allow the Vite dev-server origin.
+const CLIENT_DIST = path.join(process.cwd(), 'client-dist');
+const isProduction = process.env.NODE_ENV === 'production';
+if (!isProduction) {
+  app.use(cors({ origin: 'http://localhost:5173' }));
+}
 app.use(express.json({ limit: '10mb' }));
 
 // Health check
@@ -78,8 +84,18 @@ wss.on('connection', (ws) => {
   });
 });
 
+// ----- Serve built client in production -----
+if (isProduction) {
+  app.use(express.static(CLIENT_DIST));
+  // SPA catch-all: let the client-side router handle unmatched GETs
+  app.get('*', (_req, res) => {
+    res.sendFile(path.join(CLIENT_DIST, 'index.html'));
+  });
+}
+
 server.listen(PORT, () => {
   console.log(`Smart Circuit server running on http://localhost:${PORT}`);
   console.log(`WebSocket endpoint: ws://localhost:${PORT}/ws`);
   console.log(`Gemini API key: ${process.env.GEMINI_API_KEY ? '✓ configured' : '✗ missing'}`);
+  if (isProduction) console.log(`Serving client from ${CLIENT_DIST}`);
 });

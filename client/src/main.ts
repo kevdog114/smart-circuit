@@ -1,4 +1,5 @@
 import { createDocument, createSheet, nextDesignator, AddComponentCommand, AddWireCommand, AddWireNodeCommand, MoveWireNodeCommand, DeleteWireNodeCommand, MoveComponentCommand, RotateComponentCommand, DeleteComponentCommand, DeleteWireCommand } from './core/index';
+import { API_BASE } from './config';
 import { CommandStack } from './core/command-stack';
 import { eventBus } from './core/event-bus';
 import { SchematicRenderer } from './schematic/canvas-renderer';
@@ -1609,7 +1610,7 @@ async function sendLLMMessage() {
   const contentSpan = assistantDiv.querySelector('.msg-content')!;
 
   try {
-    const response = await fetch('http://localhost:3001/api/llm/chat', {
+    const response = await fetch(`${API_BASE}/llm/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ messages: chatHistory, circuitContext })
@@ -1808,7 +1809,7 @@ jlcpcbLibSearch.addEventListener('input', () => {
     const basicParam = isBasicOnly ? '&basic=true' : '';
 
     try {
-      const res = await fetch(`http://localhost:3001/api/components/search?q=${encodeURIComponent(q)}&limit=30${basicParam}${pkgParam}`);
+      const res = await fetch(`${API_BASE}/components/search?q=${encodeURIComponent(q)}&limit=30${basicParam}${pkgParam}`);
       const data = await res.json();
       const results = data.results || [];
 
@@ -1855,7 +1856,7 @@ jlcpcbLibSearch.addEventListener('input', () => {
 
               try {
                 const mpnParam = ds.mpn ? `&mpn=${encodeURIComponent(ds.mpn)}` : '';
-                const resolveRes = await fetch(`http://localhost:3001/api/components/resolve?lcsc=${encodeURIComponent(ds.lcsc)}${mpnParam}`);
+                const resolveRes = await fetch(`${API_BASE}/components/resolve?lcsc=${encodeURIComponent(ds.lcsc)}${mpnParam}`);
                 if (resolveRes.ok) {
                   const resolved: ResolvedComponentResponse = await resolveRes.json();
                   if (resolved.pins?.length > 0) {
@@ -2569,7 +2570,7 @@ mapSearchInput.addEventListener('input', () => {
     try {
       const isBasicOnly = (document.getElementById('map-basic-filter') as HTMLInputElement).checked;
       const basicParam = isBasicOnly ? '&basic=true' : '';
-      const res = await fetch(`http://localhost:3001/api/components/search?q=${encodeURIComponent(q)}&limit=40${basicParam}${pkgParam}`);
+      const res = await fetch(`${API_BASE}/components/search?q=${encodeURIComponent(q)}&limit=40${basicParam}${pkgParam}`);
       const data = await res.json();
       
       let results = data.results || [];

@@ -1,5 +1,6 @@
 import { serializeDocument } from '../core/document';
 import type { CircuitDocument } from '../core/types';
+import { getWebSocketUrl } from '../config';
 
 export type ConnectionState = 'connected' | 'disconnected' | 'connecting';
 
@@ -26,7 +27,7 @@ export class WebSocketService {
   onConnectionChange: ((state: ConnectionState) => void) | null = null;
   onSaveAck: ((data: { id: string; updatedAt: string }) => void) | null = null;
 
-  constructor(url: string = `ws://${location.hostname}:3001/ws`) {
+  constructor(url: string = getWebSocketUrl()) {
     this.url = url;
   }
 

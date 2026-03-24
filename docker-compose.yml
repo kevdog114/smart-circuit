@@ -1,0 +1,16 @@
+services:
+  smart-circuit:
+    image: ghcr.io/kevdog114/smart-circuit:main
+    # To build locally instead of pulling:
+    # build: .
+    ports:
+      - "3001:3001"
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - PORT=3001
+    volumes:
+      - smart-circuit-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  smart-circuit-data:

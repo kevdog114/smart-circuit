@@ -1,0 +1,14 @@
+node_modules/
+dist/
+.git/
+.gitignore
+.env
+*.eprj
+*.tgz
+*.kicad_sch
+.DS_Store
+docs/
+*.log
+server/gemini.log
+server/data/
+client/dist/
