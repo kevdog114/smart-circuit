@@ -261,7 +261,8 @@ wss.on('connection', (ws) => {
 if (isProduction) {
   app.use(express.static(CLIENT_DIST));
   // SPA catch-all: let the client-side router handle unmatched GETs
-  app.get('*', (_req, res) => {
+  // Express 5 uses '{*path}' instead of '*' for catch-all routes
+  app.get('/{*path}', (_req, res) => {
     res.sendFile(path.join(CLIENT_DIST, 'index.html'));
   });
 }
