@@ -12,6 +12,7 @@
     "debug:import": "tsx tools/easyeda-debug.ts"
   },
   "devDependencies": {
+    "@types/node": "^25.9.1",
     "@types/pako": "^2.0.4",
     "@types/sql.js": "^1.4.10",
     "tsx": "^4.21.0",

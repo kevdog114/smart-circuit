@@ -2,9 +2,10 @@
 // Smart Circuit — PCB Canvas Renderer
 // Renders board outline, pads, traces, components with
 // multi-layer transparency on an HTML5 Canvas.
+// Includes full manual routing support.
 // ============================================================
 
-import type { CircuitDocument, PCBComponent, PCBTrace, PCBLayer, Point } from '../core/types';
+import type { CircuitDocument, PCBComponent, PCBTrace, PCBVia, PCBLayer, Point, PCBTool } from '../core/types';
 import type { FootprintDefinition, PadDefinition } from '../library/easyeda-parser';
 
 // ----- Layer Colors -----
@@ -32,6 +33,15 @@ const COLORS = {
   courtyard: '#888888',
   ghost: 'rgba(0, 201, 167, 0.35)',
   crosshair: '#ffffff22',
+  routingPreview: '#00c9a7',
+  routingActive: '#00ff88',
+  viaColor: '#ffaa00',
+  traceHighlight: '#00ff88',
+  netIndicator: '#ff6644',
+  diffPair1: '#00c9a7',
+  diffPair2: '#45a5e5',
+  lengthWarning: '#e5c545',
+  lengthError: '#e54545',
 };
 
 // ----- Rendering order for layers (bottom → top) -----
@@ -44,6 +54,10 @@ const LAYER_RENDER_ORDER: PCBLayer[] = [
   'F.Cu',
   'F.SilkS',
 ];
+
+// Copper layers reference (used for layer-specific rendering)
+const COPPER_LAYERS: PCBLayer[] = ['F.Cu', 'B.Cu', 'In1.Cu', 'In2.Cu'];
+void COPPER_LAYERS;
 
 // ----- View Transform -----
 
@@ -64,9 +78,6 @@ export class PCBRenderer {
 
   // Grid in mm (default 0.254mm = 10 mils)
   private gridSizeMm = 0.254;
-  // Scale factor: 1mm = how many canvas pixels at scale 1.0
-  // We use 1mm = 1 world unit, then the view scale handles zoom.
-  // At scale 4.0, 1mm = 4 screen pixels, which is a reasonable starting zoom.
 
   // Layer state
   private activeLayer: PCBLayer = 'F.Cu';
@@ -94,6 +105,12 @@ export class PCBRenderer {
   // Drag-from-drawer state
   private draggingComponentId: string | null = null;
 
+  // Routing state
+  private activeTool: PCBTool = 'select';
+  private selectedTraceId: string | null = null;
+  private selectedViaId: string | null = null;
+  private routing45Deg = false; // 45-degree routing mode
+
   // Data
   private document: CircuitDocument | null = null;
   private footprintMap = new Map<string, FootprintDefinition>();
@@ -105,6 +122,17 @@ export class PCBRenderer {
   onZoomChanged: ((percent: number) => void) | null = null;
   onDeleteRequested: ((pcbComponentIds: string[]) => void) | null = null;
   onBatchMoved: ((moves: { id: string; position: Point }[]) => void) | null = null;
+
+  // Routing callbacks
+  onRouteStart: ((netId: string, layer: PCBLayer, point: Point) => void) | null = null;
+  onRoutePoint: ((point: Point) => void) | null = null;
+  onRouteComplete: ((netId: string, layer: PCBLayer, points: Point[]) => void) | null = null;
+  onRouteCancel: (() => void) | null = null;
+  onViaPlace: ((position: Point, fromLayer: PCBLayer, toLayer: PCBLayer) => void) | null = null;
+  onLayerChange: ((layer: PCBLayer) => void) | null = null;
+  onToolChange: ((tool: PCBTool) => void) | null = null;
+  onTraceSelected: ((trace: PCBTrace | null) => void) | null = null;
+  onViaSelected: ((via: PCBVia | null) => void) | null = null;
 
   constructor(container: HTMLElement) {
     this.canvas = document.createElement('canvas');
@@ -122,8 +150,6 @@ export class PCBRenderer {
 
     this.setupEvents();
     this.resize();
-    // Use ResizeObserver instead of window 'resize' event so the canvas
-    // re-measures when the flex container settles (fixes Safari stretch on load).
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(container);
     this.startRenderLoop();
@@ -133,6 +159,10 @@ export class PCBRenderer {
 
   setDocument(doc: CircuitDocument): void {
     this.document = doc;
+    if (doc.pcbLayout) {
+      this.activeLayer = doc.pcbLayout.activeLayer || 'F.Cu';
+      this.activeTool = doc.pcbLayout.activeTool || 'select';
+    }
   }
 
   setFootprintMap(map: Map<string, FootprintDefinition>): void {
@@ -141,10 +171,27 @@ export class PCBRenderer {
 
   setActiveLayer(layer: PCBLayer): void {
     this.activeLayer = layer;
+    if (this.document?.pcbLayout) {
+      this.document.pcbLayout.activeLayer = layer;
+    }
+    this.onLayerChange?.(layer);
   }
 
   setLayerVisibility(layer: PCBLayer, visible: boolean): void {
     this.layerVisibility[layer] = visible;
+  }
+
+  setTool(tool: PCBTool): void {
+    this.activeTool = tool;
+    if (this.document?.pcbLayout) {
+      this.document.pcbLayout.activeTool = tool;
+    }
+    this.updateCursor();
+    this.onToolChange?.(tool);
+  }
+
+  set45DegreeRouting(enabled: boolean): void {
+    this.routing45Deg = enabled;
   }
 
   highlightComponent(schematicComponentId: string | null): void {
@@ -164,6 +211,10 @@ export class PCBRenderer {
     return [...this.selectedPCBComponentIds];
   }
 
+  getActiveTool(): PCBTool {
+    return this.activeTool;
+  }
+
   centerView(): void {
     const dpr = window.devicePixelRatio || 1;
     const w = this.canvas.width / dpr;
@@ -171,7 +222,6 @@ export class PCBRenderer {
 
     if (this.document?.pcbLayout) {
       const board = this.document.pcbLayout.board;
-      // Fit board in view with some padding
       const scaleX = (w * 0.8) / board.width;
       const scaleY = (h * 0.8) / board.height;
       this.transform.scale = Math.min(scaleX, scaleY, 10);
@@ -206,10 +256,34 @@ export class PCBRenderer {
     return Math.round(this.transform.scale * 100);
   }
 
+  /** Get the current active layer. */
+  getActiveLayer(): PCBLayer {
+    return this.activeLayer;
+  }
+
   destroy(): void {
     if (this.animFrameId) cancelAnimationFrame(this.animFrameId);
     this.resizeObserver?.disconnect();
     this.canvas.remove();
+  }
+
+  private updateCursor(): void {
+    switch (this.activeTool) {
+      case 'route':
+        this.canvas.style.cursor = 'crosshair';
+        break;
+      case 'via':
+        this.canvas.style.cursor = 'cell';
+        break;
+      case 'delete':
+        this.canvas.style.cursor = 'not-allowed';
+        break;
+      case 'pan':
+        this.canvas.style.cursor = 'grab';
+        break;
+      default:
+        this.canvas.style.cursor = 'crosshair';
+    }
   }
 
   // ----- Event Setup -----
@@ -234,8 +308,6 @@ export class PCBRenderer {
     window.addEventListener('keydown', e => this.onKeyDown(e));
 
     // Safari-specific: handle trackpad pinch-to-zoom via native GestureEvent.
-    // macOS trackpads appear as a single pointer so multi-touch pointer tracking
-    // doesn't capture trackpad pinch — we still need GestureEvent for that.
     this.canvas.addEventListener('gesturestart', ((e: any) => {
       e.preventDefault();
       this._gestureScale = this.transform.scale;
@@ -278,6 +350,43 @@ export class PCBRenderer {
     };
   }
 
+  /** Snap to grid with 45-degree constraint for routing. */
+  private snapRoutingPoint(p: Point, fromPoint?: Point): Point {
+    if (!fromPoint || !this.routing45Deg) {
+      return this.snapToGrid(p);
+    }
+
+    // Constrain to 45-degree angles from the previous point
+    const dx = p.x - fromPoint.x;
+    const dy = p.y - fromPoint.y;
+
+    if (Math.abs(dx) > Math.abs(dy)) {
+      // Horizontal or 45-degree
+      if (Math.abs(dy / dx) < 0.4) {
+        // Horizontal
+        return { x: p.x, y: fromPoint.y };
+      } else {
+        // 45-degree
+        const dist = Math.abs(dx);
+        const signX = dx > 0 ? 1 : -1;
+        const signY = dy > 0 ? 1 : -1;
+        return { x: fromPoint.x + signX * dist, y: fromPoint.y + signY * dist };
+      }
+    } else {
+      // Vertical or 45-degree
+      if (Math.abs(dx / dy) < 0.4) {
+        // Vertical
+        return { x: fromPoint.x, y: p.y };
+      } else {
+        // 45-degree
+        const dist = Math.abs(dy);
+        const signX = dx > 0 ? 1 : -1;
+        const signY = dy > 0 ? 1 : -1;
+        return { x: fromPoint.x + signX * dist, y: fromPoint.y + signY * dist };
+      }
+    }
+  }
+
   // ----- Pointer Handlers -----
 
   private onPointerDown(e: PointerEvent): void {
@@ -285,7 +394,7 @@ export class PCBRenderer {
     const rect = this.canvas.getBoundingClientRect();
     this.activePointers.set(e.pointerId, { x: e.clientX - rect.left, y: e.clientY - rect.top });
 
-    // Two-finger gesture start: record pinch baseline
+    // Two-finger gesture start
     if (this.activePointers.size === 2) {
       const pts = [...this.activePointers.values()];
       const dx = pts[1].x - pts[0].x;
@@ -294,7 +403,6 @@ export class PCBRenderer {
       this._pinchStartScale = this.transform.scale;
       this._pinchLastCenter = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
       this._multiTouchActive = true;
-      // Cancel any in-progress single-pointer interaction
       this.isPanning = false;
       this.isDragging = false;
       this.isBoxSelecting = false;
@@ -302,7 +410,6 @@ export class PCBRenderer {
       return;
     }
 
-    // If multitouch was just active, ignore stale single-pointer down events
     if (this._multiTouchActive) return;
 
     this.mouseScreen = { x: e.clientX - rect.left, y: e.clientY - rect.top };
@@ -317,8 +424,8 @@ export class PCBRenderer {
       return;
     }
 
-    // Middle-click or shift+click → pan
-    if (e.button === 1 || (e.button === 0 && e.shiftKey)) {
+    // Pan tool or middle-click or shift+click
+    if (this.activeTool === 'pan' || e.button === 1 || (e.button === 0 && e.shiftKey)) {
       this.isPanning = true;
       this.dragStart = { ...this.mouseScreen };
       this.canvas.style.cursor = 'grabbing';
@@ -326,20 +433,58 @@ export class PCBRenderer {
     }
 
     if (e.button === 0) {
+      // Routing mode
+      if (this.activeTool === 'route') {
+        this.handleRouteClick();
+        return;
+      }
+
+      // Via placement mode
+      if (this.activeTool === 'via') {
+        this.handleViaClick();
+        return;
+      }
+
+      // Delete mode
+      if (this.activeTool === 'delete') {
+        this.handleDeleteClick();
+        return;
+      }
+
+      // Select mode - hit test traces first, then components
+      const hitTrace = this.hitTestTrace(this.mouseWorld);
+      if (hitTrace) {
+        this.selectedTraceId = hitTrace.id;
+        this.selectedViaId = null;
+        this.onTraceSelected?.(hitTrace);
+        this.onViaSelected?.(null);
+        return;
+      }
+
+      const hitVia = this.hitTestVia(this.mouseWorld);
+      if (hitVia) {
+        this.selectedViaId = hitVia.id;
+        this.selectedTraceId = null;
+        this.onViaSelected?.(hitVia);
+        this.onTraceSelected?.(null);
+        return;
+      }
+
       // Try to hit-test a component
       const hit = this.hitTestComponent(this.mouseWorld);
       if (hit) {
         if (!this.selectedPCBComponentIds.has(hit.id)) {
-          // Not already in multi-selection — start fresh
           this.selectedPCBComponentIds.clear();
           this.selectedPCBComponentIds.add(hit.id);
         }
         this.selectedPCBComponentId = hit.id;
+        this.selectedTraceId = null;
+        this.selectedViaId = null;
         this.isDragging = true;
         this.dragStart = this.snapToGrid(this.mouseWorld);
         this.dragOffset = { x: 0, y: 0 };
-
-        // Notify about schematic component selection
+        this.onTraceSelected?.(null);
+        this.onViaSelected?.(null);
         this.onComponentSelected?.(hit.schematicComponentId);
         return;
       }
@@ -350,7 +495,98 @@ export class PCBRenderer {
       this.boxSelectEnd = { ...this.mouseWorld };
       this.selectedPCBComponentIds.clear();
       this.selectedPCBComponentId = null;
+      this.selectedTraceId = null;
+      this.selectedViaId = null;
       this.onComponentSelected?.(null);
+      this.onTraceSelected?.(null);
+      this.onViaSelected?.(null);
+    }
+  }
+
+  private handleRouteClick(): void {
+    if (!this.document?.pcbLayout) return;
+
+    const snapped = this.snapRoutingPoint(
+      this.mouseWorld,
+      this.document.pcbLayout.routingPoints?.length
+        ? this.document.pcbLayout.routingPoints![this.document.pcbLayout.routingPoints!.length - 1]
+        : undefined
+    );
+
+    // Check if clicking on a pad to start routing from that net
+    if (!this.document.pcbLayout.routingPoints || this.document.pcbLayout.routingPoints.length === 0) {
+      const padHit = this.hitTestPadForRouting(this.mouseWorld);
+      if (padHit) {
+        this.document.pcbLayout.routingNetId = padHit.netId;
+        this.document.pcbLayout.routingPoints = [{ ...snapped }];
+        this.document.pcbLayout.activeTool = 'route';
+        this.onRouteStart?.(padHit.netId, this.activeLayer, snapped);
+        return;
+      }
+    }
+
+    // Add point to in-progress route
+    if (this.document.pcbLayout.routingPoints) {
+      this.document.pcbLayout.routingPoints.push({ ...snapped });
+    }
+    this.onRoutePoint?.(snapped);
+  }
+
+  private handleViaClick(): void {
+    if (!this.document?.pcbLayout) return;
+
+    const snapped = this.snapToGrid(this.mouseWorld);
+
+    // Determine target layer
+    let targetLayer: PCBLayer;
+    if (this.activeLayer === 'F.Cu') {
+      targetLayer = this.document.pcbLayout.board.layerCount >= 4 ? 'In1.Cu' : 'B.Cu';
+    } else if (this.activeLayer === 'B.Cu') {
+      targetLayer = this.document.pcbLayout.board.layerCount >= 4 ? 'In2.Cu' : 'F.Cu';
+    } else if (this.activeLayer === 'In1.Cu') {
+      targetLayer = 'In2.Cu';
+    } else {
+      targetLayer = 'F.Cu';
+    }
+
+    // Determine net ID from routing context or nearby traces
+    const _netId = this.document.pcbLayout.routingNetId || 'unknown';
+    void _netId;
+
+    this.onViaPlace?.(snapped, this.activeLayer, targetLayer);
+
+    // Switch to target layer after placing via
+    if (this.document.pcbLayout.routingPoints) {
+      this.setActiveLayer(targetLayer);
+    }
+  }
+
+  private handleDeleteClick(): void {
+    // Try to hit-test a trace
+    const hitTrace = this.hitTestTrace(this.mouseWorld);
+    if (hitTrace) {
+      // Emit delete request
+      this.selectedTraceId = hitTrace.id;
+      this.onTraceSelected?.(hitTrace);
+      return;
+    }
+
+    const hitVia = this.hitTestVia(this.mouseWorld);
+    if (hitVia) {
+      this.selectedViaId = hitVia.id;
+      this.onViaSelected?.(hitVia);
+      return;
+    }
+
+    // Try component
+    const hit = this.hitTestComponent(this.mouseWorld);
+    if (hit) {
+      this.selectedPCBComponentId = hit.id;
+      this.selectedPCBComponentIds.clear();
+      this.selectedPCBComponentIds.add(hit.id);
+      this.onDeleteRequested?.([hit.id]);
+      this.selectedPCBComponentIds.clear();
+      this.selectedPCBComponentId = null;
     }
   }
 
@@ -367,19 +603,16 @@ export class PCBRenderer {
       const dist = Math.sqrt(dx * dx + dy * dy);
       const center: Point = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
 
-      // Pan by center movement
       this.transform.offsetX += center.x - this._pinchLastCenter.x;
       this.transform.offsetY += center.y - this._pinchLastCenter.y;
       this._pinchLastCenter = center;
 
-      // Pinch-to-zoom
       if (this._pinchStartDist > 0) {
         const ratio = dist / this._pinchStartDist;
         const newScale = Math.max(0.5, Math.min(50, this._pinchStartScale * ratio));
         if (Number.isFinite(newScale) && newScale > 0) {
           const oldScale = this.transform.scale;
           this.transform.scale = newScale;
-          // Zoom towards pinch center
           const newOffX = center.x - (center.x - this.transform.offsetX) * (newScale / oldScale);
           const newOffY = center.y - (center.y - this.transform.offsetY) * (newScale / oldScale);
           if (Number.isFinite(newOffX) && Number.isFinite(newOffY)) {
@@ -392,7 +625,6 @@ export class PCBRenderer {
       return;
     }
 
-    // Skip single-pointer handling while multitouch is active
     if (this._multiTouchActive) return;
 
     this.mouseScreen = screenPt;
@@ -413,14 +645,12 @@ export class PCBRenderer {
       };
     }
 
-    // Box selection — update end point
     if (this.isBoxSelecting) {
       this.boxSelectEnd = { ...this.mouseWorld };
       this.computeBoxSelection();
       return;
     }
 
-    // Update cursor for drag-from-drawer
     if (this.draggingComponentId) {
       this.canvas.style.cursor = 'copy';
     }
@@ -430,7 +660,6 @@ export class PCBRenderer {
     this.activePointers.delete(e.pointerId);
     try { this.canvas.releasePointerCapture(e.pointerId); } catch (_) {}
 
-    // When all fingers are lifted after a multitouch gesture, clear the flag
     if (this._multiTouchActive) {
       if (this.activePointers.size < 2) {
         this._multiTouchActive = this.activePointers.size > 0;
@@ -441,15 +670,13 @@ export class PCBRenderer {
 
     if (this.isPanning) {
       this.isPanning = false;
-      this.canvas.style.cursor = 'crosshair';
+      this.updateCursor();
       return;
     }
 
-    // Box selection complete
     if (this.isBoxSelecting) {
       this.isBoxSelecting = false;
       this.computeBoxSelection();
-      // Notify about first selected component
       if (this.selectedPCBComponentIds.size > 0) {
         const firstId = [...this.selectedPCBComponentIds][0];
         this.selectedPCBComponentId = firstId;
@@ -462,7 +689,6 @@ export class PCBRenderer {
     if (this.isDragging && this.selectedPCBComponentId) {
       if (this.dragOffset.x !== 0 || this.dragOffset.y !== 0) {
         if (this.selectedPCBComponentIds.size > 1 && this.onBatchMoved) {
-          // Multi-component drag
           const moves: { id: string; position: Point }[] = [];
           for (const id of this.selectedPCBComponentIds) {
             const comp = this.findPCBComponent(id);
@@ -478,7 +704,6 @@ export class PCBRenderer {
           }
           this.onBatchMoved(moves);
         } else {
-          // Single component drag
           const comp = this.findPCBComponent(this.selectedPCBComponentId);
           if (comp) {
             this.onComponentMoved?.(this.selectedPCBComponentId, {
@@ -498,19 +723,15 @@ export class PCBRenderer {
       if (e.cancelable) e.preventDefault();
     } catch (_) { /* Safari: non-cancelable event */ }
 
-    // If a Safari gesture is active, skip — gesturechange handles zoom
     if (this._gestureActive) return;
 
     if (e.ctrlKey || e.metaKey) {
-      // Pinch-to-zoom
-      // Clamp deltaY to avoid extreme values from Safari trackpad gestures
       const clampedDeltaY = Math.max(-50, Math.min(50, e.deltaY));
       const zoomIntensity = 0.01;
       const zoomFactor = Math.exp(-clampedDeltaY * zoomIntensity);
       const oldScale = this.transform.scale;
       const newScale = Math.max(0.5, Math.min(50, oldScale * zoomFactor));
 
-      // Guard against NaN/Infinity corrupting the transform
       if (!Number.isFinite(newScale) || newScale <= 0) return;
       this.transform.scale = newScale;
 
@@ -522,7 +743,6 @@ export class PCBRenderer {
       }
       this.onZoomChanged?.(this.getZoomPercent());
     } else {
-      // Two-finger scroll → pan
       this.transform.offsetX -= e.deltaX;
       this.transform.offsetY -= e.deltaY;
     }
@@ -536,16 +756,40 @@ export class PCBRenderer {
         this.isBoxSelecting = false;
         return;
       }
+
+      // Cancel routing
+      if (this.activeTool === 'route' && this.document?.pcbLayout?.routingPoints) {
+        this.document.pcbLayout.routingPoints = [];
+        this.document.pcbLayout.routingNetId = undefined;
+        this.document.pcbLayout.activeTool = 'select';
+        this.activeTool = 'select';
+        this.updateCursor();
+        this.onRouteCancel?.();
+        return;
+      }
+
       this.draggingComponentId = null;
       this.selectedPCBComponentIds.clear();
       this.selectedPCBComponentId = null;
+      this.selectedTraceId = null;
+      this.selectedViaId = null;
       this.onComponentSelected?.(null);
-      this.canvas.style.cursor = 'crosshair';
+      this.onTraceSelected?.(null);
+      this.onViaSelected?.(null);
+      this.updateCursor();
     }
 
-    // Delete/Backspace — unplace selected PCB components (does NOT delete from schematic)
+    // Delete/Backspace
     if (e.key === 'Delete' || e.key === 'Backspace') {
-      if (this.selectedPCBComponentIds.size > 0) {
+      if (this.selectedTraceId) {
+        e.preventDefault();
+        this.onTraceSelected?.(null);
+        this.selectedTraceId = null;
+      } else if (this.selectedViaId) {
+        e.preventDefault();
+        this.onViaSelected?.(null);
+        this.selectedViaId = null;
+      } else if (this.selectedPCBComponentIds.size > 0) {
         e.preventDefault();
         this.onDeleteRequested?.([...this.selectedPCBComponentIds]);
         this.selectedPCBComponentIds.clear();
@@ -557,6 +801,30 @@ export class PCBRenderer {
         this.selectedPCBComponentId = null;
         this.onComponentSelected?.(null);
       }
+    }
+
+    // Tool shortcuts
+    if (e.key === 'r' || e.key === 'R') {
+      if (!e.ctrlKey && !e.metaKey) {
+        this.setTool(this.activeTool === 'route' ? 'select' : 'route');
+      }
+    }
+    if (e.key === 'v' || e.key === 'V') {
+      this.setTool(this.activeTool === 'via' ? 'select' : 'via');
+    }
+    if (e.key === 'd' || e.key === 'D') {
+      this.setTool(this.activeTool === 'delete' ? 'select' : 'delete');
+    }
+    if (e.key === 'h' || e.key === 'H') {
+      this.setTool(this.activeTool === 'pan' ? 'select' : 'pan');
+    }
+
+    // Double-click to complete route
+    if (e.key === 'Enter' && this.activeTool === 'route' && this.document?.pcbLayout?.routingPoints) {
+      e.preventDefault();
+      const points = [...this.document.pcbLayout.routingPoints];
+      const netId = this.document.pcbLayout.routingNetId || 'unknown';
+      this.onRouteComplete?.(netId, this.activeLayer, points);
     }
   }
 
@@ -573,37 +841,134 @@ export class PCBRenderer {
       const fp = this.footprintMap.get(comp.footprintId);
       if (!fp) continue;
 
-      // Check if world point is within the courtyard (rotated)
       const cy = fp.courtyard;
       const hw = cy.width / 2;
       const hh = cy.height / 2;
       const cx = cy.x + cy.width / 2;
       const cyY = cy.y + cy.height / 2;
 
-      // Transform world point to component-local space
       const dx = world.x - comp.position.x;
       const dy = world.y - comp.position.y;
       const rad = -(comp.rotation || 0) * Math.PI / 180;
       const localX = dx * Math.cos(rad) - dy * Math.sin(rad);
       const localY = dx * Math.sin(rad) + dy * Math.cos(rad);
 
-      if (
-        localX >= cx - hw &&
-        localX <= cx + hw &&
-        localY >= cyY - hh &&
-        localY <= cyY + hh
-      ) {
+      if (localX >= cx - hw && localX <= cx + hw && localY >= cyY - hh && localY <= cyY + hh) {
         return comp;
       }
     }
     return null;
   }
 
+  /** Hit-test traces. Returns the closest trace within snap distance. */
+  private hitTestTrace(world: Point): PCBTrace | null {
+    if (!this.document?.pcbLayout) return null;
+
+    const snapDist = 2 / this.transform.scale; // ~2mm in world space
+    let closest: PCBTrace | null = null;
+    let closestDist = snapDist;
+
+    for (const trace of this.document.pcbLayout.traces) {
+      if (trace.points.length < 2) continue;
+
+      for (let i = 0; i < trace.points.length - 1; i++) {
+        const dist = this.pointToSegmentDist(world, trace.points[i], trace.points[i + 1]);
+        if (dist < closestDist) {
+          closestDist = dist;
+          closest = trace;
+        }
+      }
+    }
+
+    return closest;
+  }
+
+  /** Hit-test vias. */
+  private hitTestVia(world: Point): PCBVia | null {
+    if (!this.document?.pcbLayout) return null;
+
+    const snapDist = 1.5 / this.transform.scale;
+    let closest: PCBVia | null = null;
+    let closestDist = snapDist;
+
+    for (const via of this.document.pcbLayout.vias) {
+      const dist = Math.sqrt(
+        (world.x - via.position.x) ** 2 + (world.y - via.position.y) ** 2
+      );
+      if (dist < closestDist) {
+        closestDist = dist;
+        closest = via;
+      }
+    }
+
+    return closest;
+  }
+
+  /** Hit-test pads for routing start. Returns pad info with net ID. */
+  private hitTestPadForRouting(world: Point): { netId: string; position: Point } | null {
+    if (!this.document?.pcbLayout) return null;
+
+    const snapDist = 3 / this.transform.scale;
+    let closest: { netId: string; position: Point } | null = null;
+    let closestDist = snapDist;
+
+    for (const comp of this.document.pcbLayout.components) {
+      if (!comp.isPlaced) continue;
+
+      const fp = this.footprintMap.get(comp.footprintId);
+      if (!fp) continue;
+
+      // Find schematic component to get net info
+      const schematicComp = this.getSchematicComponent(comp.schematicComponentId);
+      if (!schematicComp) continue;
+
+      for (const pad of fp.pads) {
+        const dx = pad.x;
+        const dy = pad.y;
+        const rad = (comp.rotation || 0) * Math.PI / 180;
+        const boardX = comp.position.x + (dx * Math.cos(rad) - dy * Math.sin(rad));
+        const boardY = comp.position.y + (dx * Math.sin(rad) + dy * Math.cos(rad));
+
+        const dist = Math.sqrt(
+          (world.x - boardX) ** 2 + (world.y - boardY) ** 2
+        );
+
+        if (dist < closestDist) {
+          closestDist = dist;
+          // Get net ID from the pin
+          const pinDef = pad.pinId || pad.id;
+          const pinInstance = schematicComp.pins.find(p => p.definitionId === pinDef);
+          const netId = pinInstance?.netId || comp.schematicComponentId;
+          closest = { netId, position: { x: boardX, y: boardY } };
+        }
+      }
+    }
+
+    return closest;
+  }
+
   private findPCBComponent(id: string): PCBComponent | undefined {
     return this.document?.pcbLayout?.components.find(c => c.id === id);
   }
 
-  /** Compute which PCB components fall inside the box-selection rectangle. */
+  private pointToSegmentDist(p: Point, a: Point, b: Point): number {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const lenSq = dx * dx + dy * dy;
+
+    if (lenSq === 0) {
+      return Math.sqrt((p.x - a.x) ** 2 + (p.y - a.y) ** 2);
+    }
+
+    let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq;
+    t = Math.max(0, Math.min(1, t));
+
+    const projX = a.x + t * dx;
+    const projY = a.y + t * dy;
+
+    return Math.sqrt((p.x - projX) ** 2 + (p.y - projY) ** 2);
+  }
+
   private computeBoxSelection(): void {
     if (!this.document?.pcbLayout) return;
 
@@ -630,8 +995,6 @@ export class PCBRenderer {
     const dpr = window.devicePixelRatio || 1;
     const newW = Math.round(parent.clientWidth * dpr);
     const newH = Math.round(parent.clientHeight * dpr);
-    // Skip if container is hidden or dimensions unchanged (prevents
-    // ResizeObserver ↔ canvas.width feedback loop that crashes Safari).
     if (newW <= 0 || newH <= 0) return;
     if (this.canvas.width === newW && this.canvas.height === newH) return;
     this.canvas.width = newW;
@@ -653,11 +1016,9 @@ export class PCBRenderer {
     const w = this.canvas.width / dpr;
     const h = this.canvas.height / dpr;
 
-    // Clear
     ctx.fillStyle = COLORS.background;
     ctx.fillRect(0, 0, w, h);
 
-    // Save & apply transform
     ctx.save();
     ctx.translate(this.transform.offsetX, this.transform.offsetY);
     ctx.scale(this.transform.scale, this.transform.scale);
@@ -667,29 +1028,33 @@ export class PCBRenderer {
     if (this.document?.pcbLayout) {
       const pcb = this.document.pcbLayout;
 
-      // Board outline
       this.renderBoardOutline(pcb);
 
-      // Render layers in order (bottom → top)
       for (const layer of LAYER_RENDER_ORDER) {
         if (!this.layerVisibility[layer]) continue;
         const opacity = layer === this.activeLayer ? 1.0 : 0.3;
         ctx.globalAlpha = opacity;
 
-        // Traces on this layer
         this.renderTraces(pcb.traces, layer);
-
-        // Components (pads) on this layer
         this.renderComponentsOnLayer(pcb.components, layer);
 
         ctx.globalAlpha = 1.0;
       }
 
-      // Courtyard outlines (always visible at full opacity)
+      // Vias (rendered on top of all layers)
+      this.renderVias(pcb.vias);
+
+      // Courtyard outlines
       this.renderCourtyards(pcb.components);
 
       // Selection / cross-highlights
       this.renderHighlights(pcb.components);
+
+      // Trace selection highlight
+      this.renderTraceHighlight();
+
+      // Routing preview
+      this.renderRoutingPreview();
     }
 
     // Ghost preview for drag-from-drawer
@@ -707,9 +1072,6 @@ export class PCBRenderer {
   private renderGrid(viewW: number, viewH: number): void {
     const { ctx } = this;
     const scale = this.transform.scale;
-
-    // Adaptive grid: show different grid levels based on zoom
-    // At low zoom, show 1mm grid; at higher zoom, show 0.254mm grid
     const effectiveGridMm = scale > 8 ? this.gridSizeMm : (scale > 3 ? this.gridSizeMm * 4 : 1.0);
 
     const startX = Math.floor(-this.transform.offsetX / scale / effectiveGridMm) * effectiveGridMm - effectiveGridMm;
@@ -717,7 +1079,6 @@ export class PCBRenderer {
     const endX = startX + viewW / scale + effectiveGridMm * 2;
     const endY = startY + viewH / scale + effectiveGridMm * 2;
 
-    // Skip rendering if there would be too many dots
     const countX = (endX - startX) / effectiveGridMm;
     const countY = (endY - startY) / effectiveGridMm;
     if (countX * countY > 10000) return;
@@ -725,7 +1086,6 @@ export class PCBRenderer {
     ctx.fillStyle = COLORS.grid;
     for (let x = startX; x <= endX; x += effectiveGridMm) {
       for (let y = startY; y <= endY; y += effectiveGridMm) {
-        // Major grid at 1mm intervals
         const isMajor = Math.abs(x % 1.0) < 0.01 && Math.abs(y % 1.0) < 0.01;
         const size = isMajor ? 0.15 : 0.08;
         ctx.fillStyle = isMajor ? COLORS.gridMajor : COLORS.grid;
@@ -733,7 +1093,6 @@ export class PCBRenderer {
       }
     }
 
-    // Origin crosshair
     ctx.strokeStyle = COLORS.crosshair;
     ctx.lineWidth = 0.05;
     ctx.beginPath();
@@ -778,6 +1137,23 @@ export class PCBRenderer {
     }
   }
 
+  private renderVias(vias: PCBVia[]): void {
+    const { ctx } = this;
+
+    for (const via of vias) {
+      ctx.fillStyle = COLORS.viaColor;
+      ctx.beginPath();
+      ctx.arc(via.position.x, via.position.y, via.outerDiameter / 2, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Drill hole
+      ctx.fillStyle = COLORS.drillHole;
+      ctx.beginPath();
+      ctx.arc(via.position.x, via.position.y, via.drill / 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
   private renderComponentsOnLayer(components: PCBComponent[], layer: PCBLayer): void {
     const { ctx } = this;
 
@@ -797,13 +1173,11 @@ export class PCBRenderer {
         ctx.rotate(comp.rotation * Math.PI / 180);
       }
 
-      // Draw pads on this layer
       for (const pad of fp.pads) {
         if (pad.layer !== layer) continue;
         this.renderPad(pad, layer);
       }
 
-      // Draw silkscreen on this layer
       if (layer === 'F.SilkS' || layer === 'B.SilkS') {
         this.renderSilkscreen(fp, layer);
       }
@@ -840,7 +1214,6 @@ export class PCBRenderer {
         break;
     }
 
-    // Drill hole for through-hole pads
     if (pad.drill && pad.drill > 0) {
       ctx.fillStyle = COLORS.drillHole;
       ctx.beginPath();
@@ -848,7 +1221,6 @@ export class PCBRenderer {
       ctx.fill();
     }
 
-    // Pad number text
     const fontSize = Math.min(pad.width, pad.height) * 0.5;
     if (fontSize > 0.1) {
       ctx.fillStyle = COLORS.background;
@@ -868,11 +1240,9 @@ export class PCBRenderer {
 
     ctx.beginPath();
     if (w > h) {
-      // Horizontal oval
       ctx.arc(cx - hw + r, cy, r, Math.PI * 0.5, Math.PI * 1.5);
       ctx.arc(cx + hw - r, cy, r, Math.PI * 1.5, Math.PI * 0.5);
     } else {
-      // Vertical oval
       ctx.arc(cx, cy - hh + r, r, Math.PI, 0);
       ctx.arc(cx, cy + hh - r, r, 0, Math.PI);
     }
@@ -885,11 +1255,11 @@ export class PCBRenderer {
     const color = PCB_COLORS[layer];
 
     for (const silk of fp.silkscreen) {
-      if (silk.layer !== layer) continue;
-      if (silk.points.length < 2) continue;
+      if ('layer' in silk && (silk as any).layer !== layer) continue;
+      if (!silk.points || silk.points.length < 2) continue;
 
       ctx.strokeStyle = color;
-      ctx.lineWidth = silk.strokeWidth || 0.12;
+      ctx.lineWidth = (silk as any).strokeWidth || 0.12;
       ctx.lineCap = 'round';
       ctx.setLineDash([]);
       ctx.beginPath();
@@ -927,7 +1297,6 @@ export class PCBRenderer {
       ctx.strokeRect(cy.x, cy.y, cy.width, cy.height);
       ctx.setLineDash([]);
 
-      // Designator text above courtyard
       const schematicComp = this.getSchematicComponent(comp.schematicComponentId);
       if (schematicComp) {
         ctx.fillStyle = COLORS.text;
@@ -974,14 +1343,11 @@ export class PCBRenderer {
         ctx.lineWidth = 0.15;
         ctx.setLineDash([]);
         ctx.strokeRect(cy.x - pad, cy.y - pad, cy.width + pad * 2, cy.height + pad * 2);
-
-        // Filled selection tint
         ctx.fillStyle = COLORS.selection;
         ctx.fillRect(cy.x - pad, cy.y - pad, cy.width + pad * 2, cy.height + pad * 2);
       }
 
       if (isCrossHighlighted) {
-        // Glowing outline
         ctx.shadowColor = COLORS.crossHighlight;
         ctx.shadowBlur = 3;
         ctx.strokeStyle = COLORS.crossHighlight;
@@ -993,6 +1359,99 @@ export class PCBRenderer {
 
       ctx.setLineDash([]);
       ctx.restore();
+    }
+  }
+
+  private renderTraceHighlight(): void {
+    if (!this.selectedTraceId || !this.document?.pcbLayout) return;
+
+    const trace = this.document.pcbLayout.traces.find(t => t.id === this.selectedTraceId);
+    if (!trace || trace.points.length < 2) return;
+
+    const { ctx } = this;
+
+    // Glow effect
+    ctx.strokeStyle = COLORS.traceHighlight;
+    ctx.lineWidth = trace.width + 0.3;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.globalAlpha = 0.4;
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(trace.points[0].x, trace.points[0].y);
+    for (let i = 1; i < trace.points.length; i++) {
+      ctx.lineTo(trace.points[i].x, trace.points[i].y);
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1.0;
+
+    // Length label
+    const length = trace.length ?? this.calcTraceLength(trace.points);
+    const midIdx = Math.floor(trace.points.length / 2);
+    const mid = trace.points[midIdx];
+    ctx.fillStyle = COLORS.text;
+    ctx.font = '0.8px "JetBrains Mono", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(`${length.toFixed(2)}mm`, mid.x, mid.y - trace.width - 0.2);
+  }
+
+  private calcTraceLength(points: Point[]): number {
+    let length = 0;
+    for (let i = 1; i < points.length; i++) {
+      const dx = points[i].x - points[i - 1].x;
+      const dy = points[i].y - points[i - 1].y;
+      length += Math.sqrt(dx * dx + dy * dy);
+    }
+    return length;
+  }
+
+  private renderRoutingPreview(): void {
+    if (!this.document?.pcbLayout?.routingPoints) return;
+    if (this.document.pcbLayout.routingPoints.length === 0) return;
+
+    const { ctx } = this;
+    const points = this.document.pcbLayout.routingPoints;
+
+    // Draw completed segments
+    ctx.strokeStyle = COLORS.routingActive;
+    ctx.lineWidth = this.document.pcbLayout.defaultTraceWidth || 0.2;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++) {
+      ctx.lineTo(points[i].x, points[i].y);
+    }
+    ctx.stroke();
+
+    // Draw preview line from last point to mouse
+    const lastPoint = points[points.length - 1];
+    const snappedMouse = this.snapRoutingPoint(this.mouseWorld, lastPoint);
+
+    ctx.strokeStyle = COLORS.routingPreview;
+    ctx.lineWidth = (this.document.pcbLayout.defaultTraceWidth || 0.2) * 0.5;
+    ctx.setLineDash([0.3, 0.2]);
+    ctx.beginPath();
+    ctx.moveTo(lastPoint.x, lastPoint.y);
+    ctx.lineTo(snappedMouse.x, snappedMouse.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Draw snap points (small circles at vertices)
+    for (const pt of points) {
+      ctx.fillStyle = COLORS.routingActive;
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, 0.15, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Show net name at start
+    if (this.document.pcbLayout.routingNetId) {
+      ctx.fillStyle = COLORS.netIndicator;
+      ctx.font = '0.8px "JetBrains Mono", monospace';
+      ctx.textAlign = 'left';
+      ctx.fillText(`Net: ${this.document.pcbLayout.routingNetId}`, points[0].x + 0.3, points[0].y - 0.3);
     }
   }
 
@@ -1012,7 +1471,6 @@ export class PCBRenderer {
     ctx.globalAlpha = 0.5;
     ctx.translate(snapped.x, snapped.y);
 
-    // Draw ghost courtyard
     const cy = fp.courtyard;
     ctx.strokeStyle = COLORS.selectionBorder;
     ctx.lineWidth = 0.1;
@@ -1020,7 +1478,6 @@ export class PCBRenderer {
     ctx.strokeRect(cy.x, cy.y, cy.width, cy.height);
     ctx.setLineDash([]);
 
-    // Draw ghost pads
     for (const pad of fp.pads) {
       ctx.fillStyle = COLORS.ghost;
       ctx.save();
@@ -1045,7 +1502,6 @@ export class PCBRenderer {
       ctx.restore();
     }
 
-    // Ghost designator
     const schematicComp = this.getSchematicComponent(comp.schematicComponentId);
     if (schematicComp) {
       ctx.fillStyle = COLORS.text;
@@ -1067,11 +1523,9 @@ export class PCBRenderer {
     const w = Math.abs(this.boxSelectEnd.x - this.boxSelectStart.x);
     const h = Math.abs(this.boxSelectEnd.y - this.boxSelectStart.y);
 
-    // Fill
     ctx.fillStyle = COLORS.selection;
     ctx.fillRect(x, y, w, h);
 
-    // Border
     ctx.strokeStyle = COLORS.selectionBorder;
     ctx.lineWidth = 0.15 / this.transform.scale;
     ctx.setLineDash([0.6 / this.transform.scale, 0.4 / this.transform.scale]);
@@ -1083,11 +1537,16 @@ export class PCBRenderer {
     const { ctx } = this;
     const snapped = this.snapToGrid(this.mouseWorld);
 
+    let toolText: string = this.activeTool;
+    if (this.activeTool === 'route' && this.document?.pcbLayout?.routingNetId) {
+      toolText = `route:${this.document.pcbLayout.routingNetId}`;
+    }
+
     ctx.fillStyle = COLORS.textDim;
     ctx.font = '11px "JetBrains Mono", monospace';
     ctx.textAlign = 'left';
     ctx.fillText(
-      `(${snapped.x.toFixed(2)}mm, ${snapped.y.toFixed(2)}mm)  zoom: ${this.getZoomPercent()}%  layer: ${this.activeLayer}`,
+      `(${snapped.x.toFixed(2)}mm, ${snapped.y.toFixed(2)}mm)  zoom: ${this.getZoomPercent()}%  layer: ${this.activeLayer}  tool: ${toolText}`,
       10, h - 10,
     );
   }

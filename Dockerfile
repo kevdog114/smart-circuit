@@ -42,6 +42,9 @@ COPY --from=build /app/client/dist/ client-dist/
 # Copy public assets (component library definitions etc.)
 COPY --from=build /app/client/public/ client-dist/
 
+# Copy database initialization script
+COPY init-db.sql /docker-entrypoint-initdb.d/init-db.sql
+
 # Create data directory for project persistence
 RUN mkdir -p data/projects
 

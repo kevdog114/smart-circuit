@@ -12,3 +12,5 @@ docs/
 server/gemini.log
 server/data/
 client/dist/
+*.md
+!README.md

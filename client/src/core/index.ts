@@ -21,3 +21,24 @@ export {
   healDocument
 } from './document';
 export type { SubcircuitComponentInput, SubcircuitConnectionInput } from './document';
+export {
+  createPCBLayout,
+  PlacePCBComponentCommand,
+  MovePCBComponentCommand,
+  FlipPCBComponentCommand,
+  InitializePCBFromSchematicCommand,
+} from './pcb-document';
+export {
+  TRACE_PRESETS,
+  calculateTraceLength,
+  checkTraceOverlap,
+  StartPCBTraceCommand,
+  AddPCBViaCommand,
+  CompletePCBTraceCommand,
+  AddTracePointCommand,
+  RemoveTracePointCommand,
+  DeletePCBTraceCommand,
+  ModifyTraceSettingsCommand,
+  AssociateDiffPairCommand,
+  DeletePCBViaCommand,
+} from './pcb-routing';

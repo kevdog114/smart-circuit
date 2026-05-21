@@ -241,6 +241,21 @@ export interface PCBTrace {
   layer: PCBLayer;
   width: number;                 // mm
   points: Point[];               // Polyline points in mm
+  /** Length of the trace in mm (computed) */
+  length?: number;
+  /** Associated differential pair partner trace ID */
+  diffPairId?: string;
+  /** Custom settings override */
+  settings?: TraceSettings;
+}
+
+export interface TraceSettings {
+  width: number;                 // mm
+  clearance: number;             // mm keepout from other traces
+  maxLength?: number;            // mm max allowed length
+  minLength?: number;            // mm min allowed length
+  impedance?: number;            // target impedance in Ohms
+  preset?: 'signal' | 'power' | 'ground' | 'high-speed' | 'diff-pair' | 'custom';
 }
 
 export interface PCBVia {
@@ -253,6 +268,8 @@ export interface PCBVia {
   toLayer: PCBLayer;
 }
 
+export type PCBTool = 'select' | 'move' | 'route' | 'via' | 'delete' | 'pan';
+
 export interface PCBLayout {
   board: PCBBoard;
   components: PCBComponent[];
@@ -260,6 +277,16 @@ export interface PCBLayout {
   vias: PCBVia[];
   activeLayer: PCBLayer;
   layerVisibility: Record<PCBLayer, boolean>;
+  /** Current routing tool */
+  activeTool?: PCBTool;
+  /** Net being routed (when in route tool) */
+  routingNetId?: string;
+  /** In-progress trace points */
+  routingPoints?: Point[];
+  /** Default trace settings */
+  defaultTraceWidth?: number;
+  /** Snap to grid for routing */
+  routingGridSize?: number;
 }
 
 // ----- Command System -----
@@ -292,7 +319,15 @@ export type EventType =
   | 'pcb:component:placed'
   | 'pcb:component:moved'
   | 'pcb:layer:changed'
-  | 'pcb:view:changed';
+  | 'pcb:view:changed'
+  | 'pcb:trace:added'
+  | 'pcb:trace:removed'
+  | 'pcb:trace:modified'
+  | 'pcb:via:added'
+  | 'pcb:via:removed'
+  | 'pcb:tool:changed'
+  | 'pcb:routing:start'
+  | 'pcb:routing:end';
 
 export interface AppEvent {
   type: EventType;
