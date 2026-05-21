@@ -17,8 +17,9 @@ services:
 
   postgres:
     image: postgres:16-alpine
+    # Port mapped to 5433 to avoid conflicts; internal port remains 5432
     ports:
-      - "5432:5432"
+      - "5433:5432"
     environment:
       - POSTGRES_DB=smartcircuit
       - POSTGRES_USER=smartcircuit
