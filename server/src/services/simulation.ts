@@ -31,7 +31,11 @@ export interface SimulationResult {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const WORKER_PATH = path.join(__dirname, 'simulation-worker.ts');
+const isProduction = process.env.NODE_ENV === 'production';
+// In production, use the compiled JS file; in development, use TS with tsx loader
+const WORKER_PATH = isProduction
+  ? path.join(__dirname, 'simulation-worker.js')
+  : path.join(__dirname, 'simulation-worker.ts');
 
 const INIT_TIMEOUT_MS = 15_000;
 const RUN_TIMEOUT_MS = 60_000;
@@ -52,9 +56,9 @@ function spawnChild(): Promise<void> {
       childReady = false;
     }
 
-    // Fork the worker. Use --import tsx to register the TS loader in the child.
+    // Fork the worker. Use tsx loader in development, plain Node in production.
     child = fork(WORKER_PATH, [], {
-      execArgv: ['--import', 'tsx'],
+      execArgv: isProduction ? [] : ['--import', 'tsx'],
       stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
     });
 
